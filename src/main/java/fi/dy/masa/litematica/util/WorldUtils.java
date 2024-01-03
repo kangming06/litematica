@@ -39,11 +39,7 @@ import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.util.math.Vec3i;
+import net.minecraft.util.math.*;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.ChunkStatus;
@@ -435,6 +431,51 @@ public class WorldUtils
         return false;
     }
 
+
+    private static Vec3d getHitPositionForSidePosition(BlockPos posSide, Direction sideFromTarget)
+    {
+        Direction.Axis axis =sideFromTarget.getAxis();
+        double x = posSide.getX() + 0.5 - sideFromTarget.getOffsetX() * 0.5;
+        double y = posSide.getY() + (axis == Direction.Axis.Y ? (sideFromTarget == Direction.DOWN ? 1.0 : 0.0) : 0.0);
+        double z = posSide.getZ() + 0.5 - sideFromTarget.getOffsetZ() * 0.5;
+
+        return new Vec3d(x, y, z);
+    }
+
+    @Nullable
+    private static BlockHitResult getAdjacentClickPosition(HitResult traceVanilla,BlockPos pos,MinecraftClient mc,Hand hand){
+        // If there is a block in the world right behind the targeted schematic block, then use
+        // that block as the click position
+        if (traceVanilla != null && traceVanilla.getType() == HitResult.Type.BLOCK)
+        {
+            BlockHitResult placeVanilla = (BlockHitResult) traceVanilla;
+            BlockPos posVanilla = placeVanilla.getBlockPos();
+            Direction sideVanilla = placeVanilla.getSide();
+            if (pos.equals(posVanilla.offset(sideVanilla))){
+                BlockState stateVanilla = mc.world.getBlockState(posVanilla);
+                Vec3d hitVanilla = traceVanilla.getPos();
+                ItemPlacementContext ctx = new ItemPlacementContext(new ItemUsageContext(mc.player, hand, placeVanilla));
+                if (!stateVanilla.canReplace(ctx))
+                    return new BlockHitResult(hitVanilla, sideVanilla, posVanilla, false);
+
+            }
+        }
+        for (Direction side : Direction.values())
+        {
+            BlockPos posAdj = pos.offset(side);
+            Vec3d hit = getHitPositionForSidePosition(posAdj, side);
+            BlockHitResult place = new BlockHitResult(hit, side.getOpposite(), posAdj, false);
+            ItemPlacementContext ctx = new ItemPlacementContext(new ItemUsageContext(mc.player, hand, place));
+
+            BlockState state = mc.world.getBlockState(posAdj);
+            if (!state.canReplace(ctx))
+            {
+                return place;
+            }
+        }
+        return null;
+    }
+
     private static ActionResult doEasyPlaceAction(MinecraftClient mc)
     {
         RayTraceWrapper traceWrapper;
@@ -463,15 +504,15 @@ public class WorldUtils
 
         if (traceWrapper.getHitType() == RayTraceWrapper.HitType.SCHEMATIC_BLOCK)
         {
-            BlockHitResult trace = traceWrapper.getBlockHitResult();
+            BlockHitResult placeSchematic = traceWrapper.getBlockHitResult();
             HitResult traceVanilla = RayTraceUtils.getRayTraceFromEntity(mc.world, mc.player, false, traceMaxRange);
-            BlockPos pos = trace.getBlockPos();
+            BlockPos posSchematic = placeSchematic.getBlockPos();
             World world = SchematicWorldHandler.getSchematicWorld();
-            BlockState stateSchematic = world.getBlockState(pos);
+            BlockState stateSchematic = world.getBlockState(posSchematic);
             ItemStack stack = MaterialCache.getInstance().getRequiredBuildItemForState(stateSchematic);
 
             // Already placed to that position, possible server sync delay
-            if (easyPlaceIsPositionCached(pos))
+            if (easyPlaceIsPositionCached(posSchematic))
             {
                 return ActionResult.FAIL;
             }
@@ -484,7 +525,7 @@ public class WorldUtils
 
             if (stack.isEmpty() == false)
             {
-                BlockState stateClient = mc.world.getBlockState(pos);
+                BlockState stateClient = mc.world.getBlockState(posSchematic);
 
                 if (stateSchematic == stateClient)
                 {
@@ -497,7 +538,7 @@ public class WorldUtils
                     return ActionResult.FAIL;
                 }
 
-                InventoryUtils.schematicWorldPickBlock(stack, pos, world, mc);
+                InventoryUtils.schematicWorldPickBlock(stack, posSchematic, world, mc);
                 Hand hand = EntityUtils.getUsedHandForItem(mc.player, stack);
 
                 // Abort if a wrong item is in the player's hand
@@ -506,67 +547,48 @@ public class WorldUtils
                     return ActionResult.FAIL;
                 }
 
-                Vec3d hitPos = trace.getPos();
-                Direction sideOrig = trace.getSide();
+                Vec3d hitSchematic = placeSchematic.getPos();
+                Direction sideSchematic = placeSchematic.getSide();
 
-                // If there is a block in the world right behind the targeted schematic block, then use
-                // that block as the click position
-                if (traceVanilla != null && traceVanilla.getType() == HitResult.Type.BLOCK)
-                {
-                    BlockHitResult hitResult = (BlockHitResult) traceVanilla;
-                    BlockPos posVanilla = hitResult.getBlockPos();
-                    Direction sideVanilla = hitResult.getSide();
-                    BlockState stateVanilla = mc.world.getBlockState(posVanilla);
-                    Vec3d hit = traceVanilla.getPos();
-                    ItemPlacementContext ctx = new ItemPlacementContext(new ItemUsageContext(mc.player, hand, hitResult));
+//                If there is a block in the world right behind the targeted schematic block, then use
+                BlockHitResult hitResult=null;
+                Direction side = applyPlacementFacing(stateSchematic, sideSchematic, stateClient);
+                if (Configs.Generic.EASY_PLACE_ADJACENT.getBooleanValue()){
+                    hitResult=getAdjacentClickPosition(traceVanilla,posSchematic,mc,hand);
+                }
+                if (hitResult==null){
+                    System.out.println("no adj!");
+                    EasyPlaceProtocol protocol = PlacementHandler.getEffectiveProtocolVersion();
 
-                    if (stateVanilla.canReplace(ctx) == false)
-                    {
-                        posVanilla = posVanilla.offset(sideVanilla);
-
-                        if (pos.equals(posVanilla))
-                        {
-                            hitPos = hit;
-                            sideOrig = sideVanilla;
-                        }
+                    if (protocol == EasyPlaceProtocol.V3) {
+                        hitSchematic = applyPlacementProtocolV3(posSchematic, stateSchematic, hitSchematic);
+                    } else if (protocol == EasyPlaceProtocol.V2) {
+                        // Carpet Accurate Block Placement protocol support, plus slab support
+                        hitSchematic = applyCarpetProtocolHitVec(posSchematic, stateSchematic, hitSchematic);
+                    } else if (protocol == EasyPlaceProtocol.SLAB_ONLY) {
+                        // Slab support only
+                        hitSchematic = applyBlockSlabProtocol(posSchematic, stateSchematic, hitSchematic);
                     }
-                }
-
-                Direction side = applyPlacementFacing(stateSchematic, sideOrig, stateClient);
-                EasyPlaceProtocol protocol = PlacementHandler.getEffectiveProtocolVersion();
-
-                if (protocol == EasyPlaceProtocol.V3)
-                {
-                    hitPos = applyPlacementProtocolV3(pos, stateSchematic, hitPos);
-                }
-                else if (protocol == EasyPlaceProtocol.V2)
-                {
-                    // Carpet Accurate Block Placement protocol support, plus slab support
-                    hitPos = applyCarpetProtocolHitVec(pos, stateSchematic, hitPos);
-                }
-                else if (protocol == EasyPlaceProtocol.SLAB_ONLY)
-                {
-                    // Slab support only
-                    hitPos = applyBlockSlabProtocol(pos, stateSchematic, hitPos);
+                    hitResult = new BlockHitResult(hitSchematic, side, posSchematic, false);
                 }
 
                 // Mark that this position has been handled (use the non-offset position that is checked above)
-                cacheEasyPlacePosition(pos);
+                cacheEasyPlacePosition(posSchematic);
 
-                BlockHitResult hitResult = new BlockHitResult(hitPos, side, pos, false);
+                System.out.printf("Sch | pos: %s side: %s, hit: %s\n", posSchematic, sideSchematic, hitSchematic);
+                System.out.printf("Fin | pos: %s side: %s, hit: %s\n", hitResult.getBlockPos(), hitResult.getSide(), hitResult.getPos());
 
-                //System.out.printf("pos: %s side: %s, hit: %s\n", pos, side, hitPos);
                 // pos, side, hitPos
                 mc.interactionManager.interactBlock(mc.player, hand, hitResult);
 
-                if (stateSchematic.getBlock() instanceof SlabBlock && stateSchematic.get(SlabBlock.TYPE) == SlabType.DOUBLE)
+                if (!Configs.Generic.EASY_PLACE_ADJACENT.getBooleanValue() && stateSchematic.getBlock() instanceof SlabBlock && stateSchematic.get(SlabBlock.TYPE) == SlabType.DOUBLE)
                 {
-                    stateClient = mc.world.getBlockState(pos);
+                    stateClient = mc.world.getBlockState(posSchematic);
 
                     if (stateClient.getBlock() instanceof SlabBlock && stateClient.get(SlabBlock.TYPE) != SlabType.DOUBLE)
                     {
-                        side = applyPlacementFacing(stateSchematic, sideOrig, stateClient);
-                        hitResult = new BlockHitResult(hitPos, side, pos, false);
+                        side = applyPlacementFacing(stateSchematic, sideSchematic, stateClient);
+                        hitResult = new BlockHitResult(hitSchematic, side, posSchematic, false);
                         mc.interactionManager.interactBlock(mc.player, hand, hitResult);
                     }
                 }
@@ -937,6 +959,14 @@ public class WorldUtils
     }
 
     /**
+    * Temporary Hack
+    */
+    private static int getHighestNonEmptySectionYOffset(Chunk chunk) {
+        int i = chunk.getHighestNonEmptySection();
+        return i == -1 ? chunk.getBottomY() : ChunkSectionPos.getBlockCoord(chunk.sectionIndexToCoord(i));
+    }
+
+    /**
      * Checks if the given one block thick slice has non-air blocks or not.
      * NOTE: The axis is the perpendicular axis (that goes through the plane).
      * @param axis
@@ -965,7 +995,8 @@ public class WorldUtils
                     Chunk chunk = world.getChunk(cx, z >> 4);
                     int xMin = Math.max(x1,  cx << 4      );
                     int xMax = Math.min(x2, (cx << 4) + 15);
-                    int yMax = Math.min(y2, chunk.getHighestNonEmptySectionYOffset() + 15);
+                    chunk.getHighestNonEmptySection();
+                    int yMax = Math.min(y2, getHighestNonEmptySectionYOffset(chunk) + 15);
 
                     for (int x = xMin; x <= xMax; ++x)
                     {
@@ -1000,7 +1031,7 @@ public class WorldUtils
                     {
                         Chunk chunk = world.getChunk(cx, cz);
 
-                        if (y > chunk.getHighestNonEmptySectionYOffset() + 15)
+                        if (y > getHighestNonEmptySectionYOffset(chunk) + 15)
                         {
                             continue;
                         }
@@ -1041,7 +1072,7 @@ public class WorldUtils
                     Chunk chunk = world.getChunk(x >> 4, cz);
                     int zMin = Math.max(z1,  cz << 4      );
                     int zMax = Math.min(z2, (cz << 4) + 15);
-                    int yMax = Math.min(y2, chunk.getHighestNonEmptySectionYOffset() + 15);
+                    int yMax = Math.min(y2, getHighestNonEmptySectionYOffset(chunk) + 15);
 
                     for (int z = zMin; z <= zMax; ++z)
                     {
